@@ -39,8 +39,12 @@ export function Sidebar({ open, onClose }: SidebarProps) {
       {/* Sidebar */}
       <aside
         className={cn(
-          "fixed left-0 z-50 h-[calc(100vh-4rem)] w-64 glass-modern border-r border-border/50 transition-transform duration-300 md:sticky md:translate-x-0",
-          open ? "translate-x-0" : "-translate-x-full"
+          // Mobile: fixed overlay that slides in/out
+          "fixed left-0 top-16 z-50 h-screen w-64 glass-modern border-r border-border/50 transition-transform duration-300 ease-in-out",
+          // Desktop: always visible, in normal flow
+          "md:relative md:top-0 md:h-screen md:z-auto md:flex-shrink-0",
+          // Mobile visibility
+          open ? "translate-x-0" : "-translate-x-full md:translate-x-0"
         )}
       >
         <div className="flex h-full flex-col">

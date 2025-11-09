@@ -22,6 +22,7 @@ export interface Service {
   unit: string;
   price_for_user: number;
   price_for_planner: number;
+  advance?: number;
   extras: ServiceExtra[];
   active: boolean;
 }

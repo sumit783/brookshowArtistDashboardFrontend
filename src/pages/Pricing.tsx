@@ -10,7 +10,14 @@ import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Badge } from "../components/ui/badge";
 import { useToast } from "../hooks/use-toast";
-import { DollarSign, User, Users } from "lucide-react";
+import { User, Users, Pencil, Calendar } from "lucide-react";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../components/ui/select";
 
 export default function Pricing() {
   const { user } = useAuth();
@@ -24,66 +31,136 @@ export default function Pricing() {
   }, [user]);
 
   const loadServices = async () => {
-    if (!user?.artistId) return;
+    console.log("loadServices called, user:", user);
+    
+    if (!user) {
+      console.warn("No user found");
+      setLoading(false);
+      return;
+    }
+
+    // For artist users, use user.id as artistId if artistId is not set
+    const artistId = user.artistId || (user.role === "artist" ? user.id : null);
+    
+    if (!artistId) {
+      console.warn("No artistId found in user object:", user);
+      setLoading(false);
+      return;
+    }
 
     try {
+      console.log("Loading cached services...");
       const cached = await storage.getAllItems<Service>("services");
       if (cached.length > 0) {
+        console.log("Found cached services:", cached.length);
         setServices(cached);
       }
 
-      const data = await apiClient.services.getByArtist(user.artistId);
-      setServices(data);
+      console.log("Fetching services from API for artistId:", artistId);
+      const data = await apiClient.services.getByArtist(artistId);
+      console.log("Received services from API:", data);
+      
+      if (data && data.length > 0) {
+        setServices(data);
+        console.log("Setting services in state:", data.length, "items");
 
-      for (const service of data) {
-        await storage.setItem("services", service.id, service);
+        for (const service of data) {
+          await storage.setItem("services", service.id, service);
+        }
+        console.log("Services cached to storage");
+      } else {
+        console.warn("No services returned from API");
+        setServices([]);
       }
     } catch (error) {
       console.error("Failed to load services:", error);
+      const errorMessage = error instanceof Error ? error.message : "Failed to load pricing";
       toast({
         title: "Error",
-        description: "Failed to load pricing",
+        description: errorMessage,
         variant: "destructive",
       });
+      // Keep cached services if API fails and we don't have any in state yet
+      const cached = await storage.getAllItems<Service>("services");
+      if (cached.length > 0) {
+        console.log("Using cached services after API error:", cached.length);
+        setServices(cached);
+      }
     } finally {
       setLoading(false);
     }
   };
 
-  const handlePriceUpdate = async (
+  const handleFieldUpdate = async (
     serviceId: string,
-    field: "price_for_user" | "price_for_planner",
-    value: string
+    field: "price_for_user" | "price_for_planner" | "advance" | "unit",
+    value: string | number
   ) => {
-    const price = parseFloat(value);
-    if (isNaN(price) || price < 0) {
-      toast({
-        title: "Invalid price",
-        description: "Please enter a valid positive number",
-        variant: "destructive",
-      });
-      return;
+    let processedValue: number | string = value;
+    
+    // Validate numeric fields
+    if (field === "price_for_user" || field === "price_for_planner" || field === "advance") {
+      const numValue = typeof value === "string" ? parseFloat(value) : value;
+      if (isNaN(numValue) || numValue < 0) {
+        toast({
+          title: "Invalid value",
+          description: "Please enter a valid positive number",
+          variant: "destructive",
+        });
+        return;
+      }
+      processedValue = numValue;
     }
 
     const service = services.find((s) => s.id === serviceId);
     if (!service) return;
 
-    const updatedService = { ...service, [field]: price };
+    // Optimistically update UI
+    const updatedService = { ...service, [field]: processedValue };
     setServices((prev) => prev.map((s) => (s.id === serviceId ? updatedService : s)));
-
-    await storage.setItem("services", serviceId, updatedService);
-    await syncQueue.enqueue({
-      action: "update",
-      entity: "service",
-      data: { id: serviceId, [field]: price },
-    });
-
-    toast({
-      title: "Price updated",
-      description: "Changes saved successfully",
-    });
-
     setEditingId(null);
+
+    try {
+      // Update via API
+      console.log("Updating service field via API:", serviceId, field, processedValue);
+      await apiClient.services.update(serviceId, { [field]: processedValue });
+      
+      // Refetch all services to ensure we have the latest data
+      console.log("Refetching services after update");
+      const artistId = user?.artistId || (user?.role === "artist" ? user.id : null);
+      if (artistId) {
+        const refreshedServices = await apiClient.services.getByArtist(artistId);
+        setServices(refreshedServices);
+        
+        // Update cache
+        for (const svc of refreshedServices) {
+          await storage.setItem("services", svc.id, svc);
+        }
+      }
+
+      toast({
+        title: "Updated",
+        description: "Changes saved successfully",
+      });
+    } catch (error) {
+      console.error("Failed to update field:", error);
+      
+      // Revert optimistic update on error
+      setServices((prev) => prev.map((s) => (s.id === serviceId ? service : s)));
+      
+      const errorMessage = error instanceof Error ? error.message : "Failed to update";
+      toast({
+        title: "Error",
+        description: errorMessage,
+        variant: "destructive",
+      });
+      
+      // Restore editing state so user can try again
+      const fieldSuffix = field === "price_for_user" ? "user" : 
+                         field === "price_for_planner" ? "planner" :
+                         field === "advance" ? "advance" : "unit";
+      setEditingId(`${serviceId}-${fieldSuffix}`);
+    }
   };
 
   if (loading) {
@@ -104,10 +181,27 @@ export default function Pricing() {
           <Card key={service.id}>
             <CardHeader>
               <CardTitle className="flex items-center justify-between">
-                {service.title}
-                {!service.active && (
-                  <Badge variant="secondary">Inactive</Badge>
-                )}
+                <span>{service.title}</span>
+                <div className="flex items-center gap-2">
+                  <Select
+                    value={service.unit}
+                    onValueChange={(value) => {
+                      handleFieldUpdate(service.id, "unit", value);
+                    }}
+                  >
+                    <SelectTrigger className="w-24 h-7 text-sm">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="hour">hour</SelectItem>
+                      <SelectItem value="event">event</SelectItem>
+                      <SelectItem value="day">day</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  {!service.active && (
+                    <Badge variant="secondary">Inactive</Badge>
+                  )}
+                </div>
               </CardTitle>
               <p className="text-sm text-muted-foreground">
                 {service.description}
@@ -131,7 +225,7 @@ export default function Pricing() {
                         defaultValue={service.price_for_user}
                         autoFocus
                         onBlur={(e) =>
-                          handlePriceUpdate(
+                          handleFieldUpdate(
                             service.id,
                             "price_for_user",
                             e.target.value
@@ -139,7 +233,7 @@ export default function Pricing() {
                         }
                         onKeyDown={(e) => {
                           if (e.key === "Enter") {
-                            handlePriceUpdate(
+                            handleFieldUpdate(
                               service.id,
                               "price_for_user",
                               e.currentTarget.value
@@ -153,13 +247,14 @@ export default function Pricing() {
                       className="flex items-center gap-2 p-2 rounded-md border cursor-pointer hover:bg-muted"
                       onClick={() => setEditingId(`${service.id}-user`)}
                     >
-                      <DollarSign className="h-4 w-4 text-muted-foreground" />
+                      <span className="text-muted-foreground font-semibold">₹</span>
                       <span className="font-semibold">
                         {service.price_for_user}
                       </span>
                       <span className="text-xs text-muted-foreground">
                         {service.unit}
                       </span>
+                      <Pencil className="h-3 w-3 ml-auto text-muted-foreground" />
                     </div>
                   )}
                 </div>
@@ -179,7 +274,7 @@ export default function Pricing() {
                         defaultValue={service.price_for_planner}
                         autoFocus
                         onBlur={(e) =>
-                          handlePriceUpdate(
+                          handleFieldUpdate(
                             service.id,
                             "price_for_planner",
                             e.target.value
@@ -187,7 +282,7 @@ export default function Pricing() {
                         }
                         onKeyDown={(e) => {
                           if (e.key === "Enter") {
-                            handlePriceUpdate(
+                            handleFieldUpdate(
                               service.id,
                               "price_for_planner",
                               e.currentTarget.value
@@ -201,13 +296,62 @@ export default function Pricing() {
                       className="flex items-center gap-2 p-2 rounded-md border cursor-pointer hover:bg-muted"
                       onClick={() => setEditingId(`${service.id}-planner`)}
                     >
-                      <DollarSign className="h-4 w-4 text-muted-foreground" />
+                      <span className="text-muted-foreground font-semibold">₹</span>
                       <span className="font-semibold">
                         {service.price_for_planner}
                       </span>
                       <span className="text-xs text-muted-foreground">
                         {service.unit}
                       </span>
+                      <Pencil className="h-3 w-3 ml-auto text-muted-foreground" />
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Advance */}
+              <div className="pt-2 border-t">
+                <div className="space-y-2">
+                  <Label className="flex items-center gap-2 text-sm">
+                    <Calendar className="h-4 w-4" />
+                    Advance Payment
+                  </Label>
+                  {editingId === `${service.id}-advance` ? (
+                    <div className="flex gap-2">
+                      <Input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        defaultValue={service.advance || 0}
+                        autoFocus
+                        onBlur={(e) =>
+                          handleFieldUpdate(
+                            service.id,
+                            "advance",
+                            e.target.value
+                          )
+                        }
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            handleFieldUpdate(
+                              service.id,
+                              "advance",
+                              e.currentTarget.value
+                            );
+                          }
+                        }}
+                      />
+                    </div>
+                  ) : (
+                    <div
+                      className="flex items-center gap-2 p-2 rounded-md border cursor-pointer hover:bg-muted"
+                      onClick={() => setEditingId(`${service.id}-advance`)}
+                    >
+                      <span className="text-muted-foreground font-semibold">₹</span>
+                      <span className="font-semibold">
+                        {service.advance || 0}
+                      </span>
+                      <Pencil className="h-3 w-3 ml-auto text-muted-foreground" />
                     </div>
                   )}
                 </div>
@@ -225,7 +369,7 @@ export default function Pricing() {
                         <span className="text-muted-foreground">
                           {extra.title}
                         </span>
-                        <span className="font-medium">+${extra.price}</span>
+                        <span className="font-medium">+₹{extra.price}</span>
                       </div>
                     ))}
                   </div>
